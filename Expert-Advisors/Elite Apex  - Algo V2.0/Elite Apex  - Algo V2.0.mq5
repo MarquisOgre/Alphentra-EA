@@ -1,57 +1,41 @@
 //+------------------------------------------------------------------+
-//|                                      APEX_DTC_Elite_v1.2.mq5     |
-//|     APEX ELITE V5.1  +  DTC EMA STACK  •  FULL HYBRID            |
-//|     Liquidity • Structure • Order Blocks • FVG • DOM             |
-//|     Multi-Symbol Scanner • Session Ranges • Crystal Trade Plan   |
-//|     Detailed Alerts • High-Visibility Color Schema               |
-//|     BUILD 1.20  •  Complete Production Version                   |
+//|                                                                  |
+//|                    A L P H E N T R A   A I                       |
+//|                                                                  |
+//|                     TRADE BEYOND LIMITS.                         |
+//|                                                                  |
+//|                     ELITE APEX ALGO 2.0                          |
+//|  --------------------------------------------------------------  |
+//|                                                                  |
+//|  PRODUCT  : ELITE APEX                                           |
+//|  DEVELOPER: ALPHENTRA AI                                         |
+//|  ENGINE   : INTEGRATED SMC + EMA + MTF + ALGO                    |
+//|                                                                  |
+//|  FEATURES :                                                      |
+//|    - Smart Money Concepts (SMC)                                  |
+//|    - EMA Ribbon & Multi-Timeframe Analysis                       |
+//|    - Market Scanner & Trading Dashboard                          |
+//|    - Signal Intelligence & Automated Execution                   |
+//|    - Risk Management & Trade Protection                          |
+//|                                                                  |
+//|  COPYRIGHT: Alphentra Ai                                         |
+//|  WEBSITE  : https://alphentra.app/                               |
+//|  TELEGRAM : @Alphentra                                           |
+//|                                                                  |
+//|  --------------------------------------------------------------  |
+//|                                                                  |
+//|             PROPRIETARY SOFTWARE - ALPHENTRA AI                  |
+//|                                                                  |
 //+------------------------------------------------------------------+
-#property copyright   "APEX + DTC Elite Hybrid"
-#property link        ""
-#property version     "1.20"
-#property description "Institutional SMC engine + DTC EMA Stack confluence"
-#property description "Full Scanner, Session Boxes, OP/SL/TP1-3/BE Trade Plan"
-#property description "Detailed Alerts with Entry, SL, TP1, TP2, TP3, BE"
-#property indicator_chart_window
-#property indicator_buffers 6
-#property indicator_plots   6
 
-//--- EMA Ribbon (DTC)
-#property indicator_label1  "EMA 30"
-#property indicator_type1   DRAW_LINE
-#property indicator_color1  clrLime
-#property indicator_style1  STYLE_SOLID
-#property indicator_width1  3
+#property copyright "Alphentra AI"
+#property link      "https://alphentra.ai"
+#property version "2.00"
+#property strict
+#property description "ELITE APEX by Alphentra AI | TRADE BEYOND LIMITS."
+#property description "Integrated SMC, EMA, MTF, scanner, dashboard and automated trading engine."
 
-#property indicator_label2  "EMA 35"
-#property indicator_type2   DRAW_LINE
-#property indicator_color2  clrLime
-#property indicator_style2  STYLE_SOLID
-#property indicator_width2  2
-
-#property indicator_label3  "EMA 40"
-#property indicator_type3   DRAW_LINE
-#property indicator_color3  clrLime
-#property indicator_style3  STYLE_SOLID
-#property indicator_width3  2
-
-#property indicator_label4  "EMA 45"
-#property indicator_type4   DRAW_LINE
-#property indicator_color4  clrLime
-#property indicator_style4  STYLE_SOLID
-#property indicator_width4  1
-
-#property indicator_label5  "EMA 50"
-#property indicator_type5   DRAW_LINE
-#property indicator_color5  clrLime
-#property indicator_style5  STYLE_SOLID
-#property indicator_width5  1
-
-#property indicator_label6  "EMA 60"
-#property indicator_type6   DRAW_LINE
-#property indicator_color6  clrLime
-#property indicator_style6  STYLE_SOLID
-#property indicator_width6  1
+#include <Trade/Trade.mqh>
 
 //==================================================================
 // ENUMS
@@ -172,6 +156,7 @@ input ENUM_EA_MODE InpEAMode            = EA_GV;
 input string InpEANamespace             = "APEX5";
 input bool   InpEAFileCommon            = true;
 input int    InpEAEventID               = 777001;
+input int    InpEASignalMaxAgeSec        = 120;            // Consumer must ignore expired signals
 
 input group "▄ MULTI-SYMBOL SCANNER ▀"
 input bool   InpScannerOn               = true;
@@ -217,6 +202,21 @@ input bool   InpPopupAlert              = true;
 input bool   InpSoundAlert              = true;
 input string InpSoundFile               = "alert2.wav";
 input bool   InpPushAlert               = false;
+
+input group "▄ INTEGRATED ALGO TRADING ▀"
+input bool   InpAlgoTradingEnabled        = true;     // EA execution enabled; MT5 global permissions still apply
+input long   InpAlgoMagicNumber           = 502026;
+input bool   InpAlgoUseRiskPercent        = false;    // Fixed lot sizing by default
+input double InpAlgoRiskPercent           = 0.10;
+input double InpAlgoFixedLot              = 0.10;
+input int    InpAlgoMaxPositionsPerSymbol = 3;        // Maximum APEX positions on this symbol
+input int    InpAlgoMaxTotalPositions     = 10;       // Maximum APEX positions across the account
+input double InpAlgoMaxDailyLossPercent   = 2.00;     // Stop new entries at daily equity loss limit
+input double InpAlgoMaxAggregateRiskPercent = 2.00;   // Maximum combined open risk as % of equity
+input int    InpAlgoMaxSignalAgeSec       = 120;
+input int    InpAlgoDeviationPoints       = 20;
+input bool   InpAlgoMoveToBEAtTP1         = true;
+input bool   InpAlgoMoveSLToTP1AtTP2      = true;
 
 //==================================================================
 // HIGH-VISIBILITY COLOR SCHEMA (AI Optimized)
@@ -273,9 +273,10 @@ string g_mtfText[5];
 // Core state
 datetime g_lastBarT   = 0;
 uint     g_lastUI     = 0;
+uint     g_mtfLastUpdate = 0;
 
 // Risk governor
-int      g_daily = 0, g_sess = 0, g_dayNum = -1;
+int      g_daily = 0, g_sess = 0, g_dayNum = -1, g_sessionKey = -1;
 datetime g_lastSignal = 0, g_lastSignalBar = 0;
 int      g_lastDir = 0;
 
@@ -333,8 +334,11 @@ string   g_targetTag = "-";
 bool     g_planBuy = true, g_confirmed = false;
 datetime g_signalTime = 0;
 
-// EA
+// EA signal protocol
 long     g_eaSeq = 0;
+long     g_eaAckLoggedSeq = 0;
+datetime g_eaSignalCreated = 0;
+string   g_eaSignalId = "";
 
 // Scanner
 string   g_scanSyms[];
@@ -357,23 +361,31 @@ datetime g_sesT1[MAX_SES], g_sesT2[MAX_SES];
 bool     g_sesActive[MAX_SES];
 int      g_sesSweep[MAX_SES];
 int      g_sesTick = 0;
+datetime g_lastChartBarT = 0;
+
+// Integrated execution state
+CTrade   g_algoTrade;
+string   g_algoBase = "", g_algoDayKey = "";
+double   g_algoDayStartEquity = 0.0;
+int      g_algoDayKeyNum = -1;
+bool     g_algoPending = false, g_algoPendingBuy = false;
+datetime g_algoPendingCreated = 0, g_algoPendingSignalTime = 0;
+double   g_algoPendingOP = 0, g_algoPendingSL = 0;
+double   g_algoPendingTP1 = 0, g_algoPendingTP2 = 0;
+double   g_algoPendingTP3 = 0, g_algoPendingBE = 0;
+int      g_algoPendingScore = 0;
+bool     g_algoPendingLogOnce = false;
 
 //==================================================================
 // INITIALIZATION
 //==================================================================
 int OnInit()
 {
-   IndicatorSetString(INDICATOR_SHORTNAME, "APEX+DTC Elite v1.2");
-   IndicatorSetInteger(INDICATOR_DIGITS, _Digits);
    DeleteByPrefix(PFX);
+   DrawTelegramBadge();
 
-   // EMA Buffers
-   SetIndexBuffer(0, EMA1Buffer, INDICATOR_DATA);
-   SetIndexBuffer(1, EMA2Buffer, INDICATOR_DATA);
-   SetIndexBuffer(2, EMA3Buffer, INDICATOR_DATA);
-   SetIndexBuffer(3, EMA4Buffer, INDICATOR_DATA);
-   SetIndexBuffer(4, EMA5Buffer, INDICATOR_DATA);
-   SetIndexBuffer(5, EMA6Buffer, INDICATOR_DATA);
+   // EMA arrays are EA-managed calculation buffers; the ribbon is
+   // rendered with chart objects because Expert Advisors have no plots.
 
    ArraySetAsSeries(EMA1Buffer, true);
    ArraySetAsSeries(EMA2Buffer, true);
@@ -393,7 +405,7 @@ int OnInit()
       handleEMA3 == INVALID_HANDLE || handleEMA4 == INVALID_HANDLE ||
       handleEMA5 == INVALID_HANDLE || handleEMA6 == INVALID_HANDLE)
    {
-      Print("APEX+DTC: Failed to create EMA handles");
+      Print("APEX ALGO EA: Failed to create EMA handles");
       return(INIT_FAILED);
    }
 
@@ -404,11 +416,25 @@ int OnInit()
    if(InpScannerOn) ScannerInit();
    if(InpSessionsOn) RefreshSessions();
 
-   if(InpScannerOn || InpSessionsOn || InpEAMode == EA_GV || InpEAMode == EA_ALL)
-      EventSetTimer(1);
+   // Timer services scanner/session updates and integrated trade management.
+   EventSetTimer(1);
+
+   g_algoBase = InpEANamespace + "_" + SymKey(_Symbol) + "_ALGO";
+   g_algoTrade.SetExpertMagicNumber(InpAlgoMagicNumber);
+   g_algoTrade.SetDeviationInPoints(InpAlgoDeviationPoints);
+   g_algoTrade.SetTypeFillingBySymbol(_Symbol);
+   if(InpAlgoRiskPercent <= 0.0 || InpAlgoRiskPercent > 5.0 ||
+      InpAlgoFixedLot <= 0.0 || InpAlgoMaxDailyLossPercent <= 0.0 ||
+      InpAlgoMaxPositionsPerSymbol < 1 || InpAlgoMaxTotalPositions < InpAlgoMaxPositionsPerSymbol ||
+      InpAlgoMaxAggregateRiskPercent <= 0.0 || InpAlgoMaxAggregateRiskPercent > 10.0 ||
+      InpAlgoMaxSignalAgeSec < 10)
+      return(INIT_PARAMETERS_INCORRECT);
+   AlgoLoadDailyBaseline();
 
    ResetDailyCounter();
-   Print("APEX+DTC Elite v1.2 initialized successfully");
+   ResetSessionCounter();
+   EA_InitializeProtocol();
+   Print("ELITE APEX Algo v2.0 initialized successfully");
    return(INIT_SUCCEEDED);
 }
 
@@ -419,6 +445,12 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    if(g_domBook) MarketBookRelease(_Symbol);
+   if(handleEMA1 != INVALID_HANDLE) IndicatorRelease(handleEMA1);
+   if(handleEMA2 != INVALID_HANDLE) IndicatorRelease(handleEMA2);
+   if(handleEMA3 != INVALID_HANDLE) IndicatorRelease(handleEMA3);
+   if(handleEMA4 != INVALID_HANDLE) IndicatorRelease(handleEMA4);
+   if(handleEMA5 != INVALID_HANDLE) IndicatorRelease(handleEMA5);
+   if(handleEMA6 != INVALID_HANDLE) IndicatorRelease(handleEMA6);
    DeleteByPrefix(PFX);
    ChartRedraw(0);
 }
@@ -482,46 +514,38 @@ void UpdateDOM()
 //==================================================================
 // MAIN CALCULATION
 //==================================================================
-int OnCalculate(const int rates_total,
-                const int prev_calculated,
-                const datetime &time[],
-                const double &open[],
-                const double &high[],
-                const double &low[],
-                const double &close[],
-                const long &tick_volume[],
-                const long &volume[],
-                const int &spread[])
+void OnTick()
 {
-   if(rates_total < 150) return(0);
+   int rates_total = Bars(_Symbol, PERIOD_CURRENT);
+   if(rates_total < 150) return;
 
-   // Copy EMA buffers
-   if(CopyBuffer(handleEMA1, 0, 0, rates_total, EMA1Buffer) <= 0) return(0);
-   if(CopyBuffer(handleEMA2, 0, 0, rates_total, EMA2Buffer) <= 0) return(0);
-   if(CopyBuffer(handleEMA3, 0, 0, rates_total, EMA3Buffer) <= 0) return(0);
-   if(CopyBuffer(handleEMA4, 0, 0, rates_total, EMA4Buffer) <= 0) return(0);
-   if(CopyBuffer(handleEMA5, 0, 0, rates_total, EMA5Buffer) <= 0) return(0);
-   if(CopyBuffer(handleEMA6, 0, 0, rates_total, EMA6Buffer) <= 0) return(0);
+   datetime chartBar = iTime(_Symbol, PERIOD_CURRENT, 0);
+   if(chartBar > 0 && chartBar != g_lastChartBarT)
+   {
+      int copyCount = MathMin(rates_total, 100);
+      if(CopyBuffer(handleEMA1, 0, 0, copyCount, EMA1Buffer) < copyCount) return;
+      if(CopyBuffer(handleEMA2, 0, 0, copyCount, EMA2Buffer) < copyCount) return;
+      if(CopyBuffer(handleEMA3, 0, 0, copyCount, EMA3Buffer) < copyCount) return;
+      if(CopyBuffer(handleEMA4, 0, 0, copyCount, EMA4Buffer) < copyCount) return;
+      if(CopyBuffer(handleEMA5, 0, 0, copyCount, EMA5Buffer) < copyCount) return;
+      if(CopyBuffer(handleEMA6, 0, 0, copyCount, EMA6Buffer) < copyCount) return;
 
-   // EMA Stack detection
-   g_emaBull = (EMA1Buffer[0] > EMA2Buffer[0] &&
-                EMA2Buffer[0] > EMA3Buffer[0] &&
-                EMA3Buffer[0] > EMA4Buffer[0] &&
-                EMA4Buffer[0] > EMA5Buffer[0] &&
-                EMA5Buffer[0] > EMA6Buffer[0]);
+      g_emaBull = (EMA1Buffer[1] > EMA2Buffer[1] &&
+                   EMA2Buffer[1] > EMA3Buffer[1] &&
+                   EMA3Buffer[1] > EMA4Buffer[1] &&
+                   EMA4Buffer[1] > EMA5Buffer[1] &&
+                   EMA5Buffer[1] > EMA6Buffer[1]);
+      g_emaBear = (EMA1Buffer[1] < EMA2Buffer[1] &&
+                   EMA2Buffer[1] < EMA3Buffer[1] &&
+                   EMA3Buffer[1] < EMA4Buffer[1] &&
+                   EMA4Buffer[1] < EMA5Buffer[1] &&
+                   EMA5Buffer[1] < EMA6Buffer[1]);
 
-   g_emaBear = (EMA1Buffer[0] < EMA2Buffer[0] &&
-                EMA2Buffer[0] < EMA3Buffer[0] &&
-                EMA3Buffer[0] < EMA4Buffer[0] &&
-                EMA4Buffer[0] < EMA5Buffer[0] &&
-                EMA5Buffer[0] < EMA6Buffer[0]);
+      color emaCol = g_emaBull ? clrBuy : (g_emaBear ? clrSell : clrGray);
+      DrawEMARibbon(copyCount, emaCol);
+      g_lastChartBarT = chartBar;
+   }
 
-   // Dynamic ribbon color
-   color emaCol = g_emaBull ? clrBuy : (g_emaBear ? clrSell : clrGray);
-   for(int p = 0; p < 6; p++)
-      PlotIndexSetInteger(p, PLOT_LINE_COLOR, emaCol);
-
-   // Tick delta
    MqlTick tk;
    if(SymbolInfoTick(_Symbol, tk))
    {
@@ -533,20 +557,22 @@ int OnCalculate(const int rates_total,
       g_lastBid = tk.bid;
    }
 
-   // New bar analysis
    datetime bt = iTime(_Symbol, InpSetupTF, 0);
    if(bt > 0 && bt != g_lastBarT)
    {
+      g_lastBarT = bt;
       if(Analyze())
       {
-         g_lastBarT = bt;
          g_tickDelta = 0;
          if(InpSessionsOn) RefreshSessions();
       }
+      else
+         g_lastBarT = 0;
    }
 
+   ProcessPendingAPEXTrade();
+   ManageAPEXPositions();
    UIDraw();
-   return(rates_total);
 }
 
 //==================================================================
@@ -554,7 +580,20 @@ int OnCalculate(const int rates_total,
 //==================================================================
 void OnTimer()
 {
+   DrawTelegramBadge();
+   ResetDailyCounter();
+   ResetSessionCounter();
+   uint mtfNow = GetTickCount();
+   if(mtfNow - g_mtfLastUpdate >= 5000)
+   {
+      g_mtfLastUpdate = mtfNow;
+      UpdateMTFBias();
+      UIDraw();
+   }
    EA_Heartbeat();
+   EA_CheckSignalState();
+   ProcessPendingAPEXTrade();
+   ManageAPEXPositions();
 
    if(InpScannerOn && g_scanN > 0)
    {
@@ -580,6 +619,14 @@ void OnTimer()
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
    if(id != CHARTEVENT_OBJECT_CLICK) return;
+
+   // White text-only Alphentra Telegram branding; DLL-free click action.
+   if(sparam == PFX + "TELEGRAM_TEXT")
+   {
+      Alert("Alphentra AI Telegram channel: https://t.me/alphentra");
+      return;
+   }
+
    if(!InpScannerOn || g_scanN <= 0) return;
 
    string base = PFX + "P_SC_r";
@@ -656,38 +703,41 @@ void UpdateMTFBias()
 
    for(int i = 0; i < 5; i++)
    {
-      double emaFast[], emaSlow[];
-      ArraySetAsSeries(emaFast, true);
-      ArraySetAsSeries(emaSlow, true);
+      // CopyRates is more reliable here than creating/releasing ten EMA
+      // handles on every update. It also allows MT5 to request missing
+      // timeframe history asynchronously.
+      MqlRates rates[];
+      ArraySetAsSeries(rates, true);
+      int copied = CopyRates(_Symbol, tfs[i], 0, 140, rates);
 
-      int hFast = iMA(_Symbol, tfs[i], 20, 0, MODE_EMA, PRICE_CLOSE);
-      int hSlow = iMA(_Symbol, tfs[i], 50, 0, MODE_EMA, PRICE_CLOSE);
-
-      if(hFast == INVALID_HANDLE || hSlow == INVALID_HANDLE)
+      if(copied < 55)
       {
          g_mtfBull[i] = false;
          g_mtfBear[i] = false;
-         g_mtfText[i] = "N/A";
+         g_mtfText[i] = "LOADING";
          continue;
       }
 
-      if(CopyBuffer(hFast, 0, 0, 5, emaFast) <= 0 ||
-         CopyBuffer(hSlow, 0, 0, 5, emaSlow) <= 0)
+      // EMAOn uses completed bar shift 1, keeping all TFs non-repainting.
+      double fastEMA = EMAOn(rates, copied, 20, 1);
+      double slowEMA = EMAOn(rates, copied, 50, 1);
+
+      if(fastEMA <= 0 || slowEMA <= 0)
       {
          g_mtfBull[i] = false;
          g_mtfBear[i] = false;
-         g_mtfText[i] = "N/A";
-         IndicatorRelease(hFast);
-         IndicatorRelease(hSlow);
+         g_mtfText[i] = "LOADING";
          continue;
       }
 
-      g_mtfBull[i] = (emaFast[0] > emaSlow[0]);
-      g_mtfBear[i] = (emaFast[0] < emaSlow[0]);
-      g_mtfText[i] = g_mtfBull[i] ? "Bullish" : "Bearish";
+      double diff = fastEMA - slowEMA;
+      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      double flatThreshold = (point > 0 ? point * 0.1 : 0.0);
 
-      IndicatorRelease(hFast);
-      IndicatorRelease(hSlow);
+      g_mtfBull[i] = (diff > flatThreshold);
+      g_mtfBear[i] = (diff < -flatThreshold);
+      g_mtfText[i] = g_mtfBull[i] ? "Bullish" :
+                     (g_mtfBear[i] ? "Bearish" : "Neutral");
    }
 }
 
@@ -1205,11 +1255,12 @@ bool InSession()
 //==================================================================
 // SCORING (Hybrid APEX + DTC)
 //==================================================================
-int Score(const bool buy, const bool sweep, const bool disp, const bool kz)
+int Score(const bool buy, const bool directionalSweep, const bool disp, const bool kz)
 {
    int s = 0;
 
-   if(sweep) s += 25;
+   // A sell-side liquidity sweep supports BUY; a buy-side sweep supports SELL.
+   if(directionalSweep) s += 25;
 
    bool brk = buy ? g_bullBreak : g_bearBreak;
    bool mss = buy ? g_bullMSS   : g_bearMSS;
@@ -1233,8 +1284,11 @@ int Score(const bool buy, const bool sweep, const bool disp, const bool kz)
    }
    else
    {
-      if(buy  && g_tickDelta > 0) s += InpDOMScoreWeight / 2;
-      if(!buy && g_tickDelta < 0) s += InpDOMScoreWeight / 2;
+      if(InpUseDOM)
+      {
+         if(buy  && g_tickDelta > 0) s += InpDOMScoreWeight / 2;
+         if(!buy && g_tickDelta < 0) s += InpDOMScoreWeight / 2;
+      }
    }
 
    // HTF
@@ -1412,47 +1466,69 @@ bool BuildTradePlan(const bool buy, const MqlRates &r[], const int total)
 }
 
 //==================================================================
-// DETAILED ALERT
+// ALERT CHANNELS
 //==================================================================
 void SendDetailedAlert(const bool buy)
 {
    int sc = buy ? g_buyScore : g_sellScore;
+   string side = buy ? "BUY" : "SELL";
+   string quality = QualityOf(sc);
+   string ema = g_emaBull ? "BULLISH STACK" :
+                (g_emaBear ? "BEARISH STACK" : "MIXED");
 
-   string msg = StringFormat(
-      "════════════════════════════════════════════\n"
-      "   APEX + DTC ELITE  •  %s SIGNAL\n"
-      "════════════════════════════════════════════\n"
-      "Symbol      : %s\n"
-      "Direction   : %s\n"
-      "Score       : %d   (%s)\n"
-      "EMA Stack   : %s\n"
-      "────────────────────────────────────────────\n"
-      "ENTRY (OP)  : %s\n"
-      "STOP LOSS   : %s   (%d points)\n"
-      "TAKE PROFIT1: %s   (%.1fR)\n"
-      "TAKE PROFIT2: %s   (%.1fR)\n"
-      "TAKE PROFIT3: %s   (%.1fR)\n"
-      "BREAK EVEN  : %s\n"
-      "Target      : %s\n"
-      "════════════════════════════════════════════",
-      buy ? "BUY" : "SELL",
-      _Symbol,
-      buy ? "LONG ▲" : "SHORT ▼",
-      sc, QualityOf(sc),
-      g_emaBull ? "BULLISH STACK" : (g_emaBear ? "BEARISH STACK" : "MIXED"),
-      DoubleToString(g_op,  _Digits),
-      DoubleToString(g_sl,  _Digits), g_riskPts,
+   // Keep the native MT5 Alert window compact: one line, no scrollable
+   // multiline body. The terminal opens this as its own foreground alert.
+   string popup = StringFormat(
+      "APEX %s | %s | %d %s | E %s | SL %s | T1 %s | T2 %s | T3 %s",
+      side, _Symbol, sc, quality,
+      DoubleToString(g_op, _Digits),
+      DoubleToString(g_sl, _Digits),
+      DoubleToString(g_tp1, _Digits),
+      DoubleToString(g_tp2, _Digits),
+      DoubleToString(g_tp3, _Digits)
+   );
+
+   // Push notifications are deliberately shorter for mobile screens.
+   string push = StringFormat(
+      "APEX %s %s | %d %s | Entry %s | SL %s | TP1 %s",
+      side, _Symbol, sc, quality,
+      DoubleToString(g_op, _Digits),
+      DoubleToString(g_sl, _Digits),
+      DoubleToString(g_tp1, _Digits)
+   );
+
+   // Full diagnostic record remains available in the Experts tab.
+   string full = StringFormat(
+      "APEX + DTC ELITE | %s SIGNAL\n"
+      "Symbol: %s | Direction: %s | Score: %d (%s)\n"
+      "EMA Stack: %s | HTF Bias: %s | Structure: %s\n"
+      "MTF: %s=%s, %s=%s, %s=%s, %s=%s, %s=%s\n"
+      "Liquidity Sweep: %s | PD Zone: %s | Regime: %s\n"
+      "Entry: %s | SL: %s (%d points)\n"
+      "TP1: %s (%.1fR) | TP2: %s (%.1fR) | TP3: %s (%.1fR)\n"
+      "Break Even: %s | Target: %s\n"
+      "Signal ID: %s | Time: %s",
+      side, _Symbol, buy ? "LONG" : "SHORT", sc, quality,
+      ema, g_htf, g_trend,
+      TFStr(InpTF1), g_mtfText[0],
+      TFStr(InpTF2), g_mtfText[1],
+      TFStr(InpTF3), g_mtfText[2],
+      TFStr(InpTF4), g_mtfText[3],
+      TFStr(InpTF5), g_mtfText[4],
+      g_sweepTxt, g_pdZone, g_regime,
+      DoubleToString(g_op, _Digits),
+      DoubleToString(g_sl, _Digits), g_riskPts,
       DoubleToString(g_tp1, _Digits), InpTP1RR,
       DoubleToString(g_tp2, _Digits), InpTP2RR,
       DoubleToString(g_tp3, _Digits), InpTP3RR,
-      DoubleToString(g_be,  _Digits),
-      g_targetTag
+      DoubleToString(g_be, _Digits), g_targetTag,
+      g_eaSignalId, TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS)
    );
 
-   if(InpPopupAlert) Alert(msg);
+   if(InpPopupAlert) Alert(popup);
    if(InpSoundAlert) PlaySound(InpSoundFile);
-   if(InpPushAlert)  SendNotification(msg);
-   Print(msg);
+   if(InpPushAlert)  SendNotification(push);
+   Print(full);
 }
 
 //==================================================================
@@ -1507,6 +1583,18 @@ void RegisterSignal(const bool buy)
    g_sess++;
    SendDetailedAlert(buy);
    EA_PushSignal(buy);
+   g_algoPending = true;
+   g_algoPendingBuy = buy;
+   g_algoPendingCreated = TimeCurrent();
+   g_algoPendingSignalTime = g_signalTime;
+   g_algoPendingOP = g_op;
+   g_algoPendingSL = g_sl;
+   g_algoPendingTP1 = g_tp1;
+   g_algoPendingTP2 = g_tp2;
+   g_algoPendingTP3 = g_tp3;
+   g_algoPendingBE = g_be;
+   g_algoPendingScore = buy ? g_buyScore : g_sellScore;
+   g_algoPendingLogOnce = false;
 }
 
 //==================================================================
@@ -1527,6 +1615,58 @@ int TGTCode(const string tag)
    return(0);
 }
 
+void EA_InitializeProtocol()
+{
+   string base = InpEANamespace + "_" + SymKey(_Symbol);
+   string seqKey = base + "_SEQ_COUNTER";
+   if(GlobalVariableCheck(seqKey))
+      g_eaSeq = (long)GlobalVariableGet(seqKey);
+
+   // Restore the pending publication timestamp so stale commands are expired
+   // after an indicator restart as well.
+   string timeKey = base + "_TIME";
+   if(GlobalVariableCheck(timeKey))
+      g_eaSignalCreated = (datetime)(long)GlobalVariableGet(timeKey);
+}
+
+void EA_CheckSignalState()
+{
+   if(!(InpEAMode == EA_GV || InpEAMode == EA_ALL)) return;
+   if(g_eaSeq <= 0 || g_eaSignalCreated <= 0) return;
+
+   string base = InpEANamespace + "_" + SymKey(_Symbol);
+   string ackKey = base + "_ACK";
+   string stateKey = base + "_STATE";
+   string cmdKey = base + "_CMD";
+   long ack = GlobalVariableCheck(ackKey) ? (long)GlobalVariableGet(ackKey) : 0;
+
+   if(ack >= g_eaSeq)
+   {
+      GlobalVariableSet(stateKey, 2); // ACKNOWLEDGED
+      if(g_eaAckLoggedSeq != g_eaSeq)
+      {
+         PrintFormat("APEX EA-HOOK acknowledged | id=%s | seq=%I64d", g_eaSignalId, g_eaSeq);
+         g_eaAckLoggedSeq = g_eaSeq;
+      }
+      return;
+   }
+
+   int maxAge = MathMax(10, InpEASignalMaxAgeSec);
+   if((long)(TimeCurrent() - g_eaSignalCreated) > maxAge)
+   {
+      // Expire only the still-current unacknowledged command.
+      long publishedSeq = GlobalVariableCheck(base + "_SEQ")
+                          ? (long)GlobalVariableGet(base + "_SEQ") : 0;
+      if(publishedSeq == g_eaSeq)
+      {
+         GlobalVariableSet(cmdKey, 0);
+         GlobalVariableSet(stateKey, -1); // EXPIRED
+         PrintFormat("APEX EA-HOOK expired | id=%s | seq=%I64d", g_eaSignalId, g_eaSeq);
+      }
+      g_eaSignalCreated = 0;
+   }
+}
+
 void EA_PushSignal(const bool buy)
 {
    if(InpEAMode == EA_OFF) return;
@@ -1534,17 +1674,26 @@ void EA_PushSignal(const bool buy)
    g_eaSeq++;
    string ns  = InpEANamespace;
    string sk  = SymKey(_Symbol);
+   // Sequence counter is persisted even when FILE or EVENT transport is used.
+   GlobalVariableSet(ns + "_" + sk + "_SEQ_COUNTER", (double)g_eaSeq);
+   g_eaSignalCreated = TimeCurrent();
+   g_eaSignalId = StringFormat("%s_%s_%I64d_%I64d",
+                               ns, sk, (long)g_signalTime, g_eaSeq);
    double cmd = buy ? 1 : 2;
    double dir = buy ? 1 : -1;
    string dirS = buy ? "BUY" : "SELL";
    int    sc  = buy ? g_buyScore : g_sellScore;
 
+   int maxAge = MathMax(10, InpEASignalMaxAgeSec);
+   datetime expiresAt = g_eaSignalCreated + maxAge;
    string json = StringFormat(
-      "{\"ns\":\"%s\",\"symbol\":\"%s\",\"cmd\":%.0f,\"dir\":\"%s\",\"seq\":%I64d,"
+      "{\"protocol\":2,\"ns\":\"%s\",\"symbol\":\"%s\",\"signal_id\":\"%s\","
+      "\"cmd\":%.0f,\"dir\":\"%s\",\"seq\":%I64d,\"created_at\":%I64d,\"expires_at\":%I64d,"
       "\"score\":%d,\"grade\":\"%s\",\"op\":%s,\"sl\":%s,\"tp1\":%s,\"tp2\":%s,"
       "\"tp3\":%s,\"be\":%s,\"risk_pts\":%d,\"tgt_code\":%d,\"target\":\"%s\","
       "\"tf\":\"%s\",\"time\":\"%s\",\"ema\":\"%s\"}",
-      ns, _Symbol, cmd, dirS, g_eaSeq, sc, QualityOf(sc),
+      ns, _Symbol, g_eaSignalId, cmd, dirS, g_eaSeq,
+      (long)g_eaSignalCreated, (long)expiresAt, sc, QualityOf(sc),
       DoubleToString(g_op,  _Digits),
       DoubleToString(g_sl,  _Digits),
       DoubleToString(g_tp1, _Digits),
@@ -1563,18 +1712,22 @@ void EA_PushSignal(const bool buy)
 
    if(doGV)
    {
-      GlobalVariableSet(ns + "_" + sk + "_CMD",   cmd);
-      GlobalVariableSet(ns + "_" + sk + "_SEQ",   (double)g_eaSeq);
-      GlobalVariableSet(ns + "_" + sk + "_DIR",   dir);
-      GlobalVariableSet(ns + "_" + sk + "_SCORE", (double)sc);
-      GlobalVariableSet(ns + "_" + sk + "_OP",    g_op);
-      GlobalVariableSet(ns + "_" + sk + "_SL",    g_sl);
-      GlobalVariableSet(ns + "_" + sk + "_TP1",   g_tp1);
-      GlobalVariableSet(ns + "_" + sk + "_TP2",   g_tp2);
-      GlobalVariableSet(ns + "_" + sk + "_TP3",   g_tp3);
-      GlobalVariableSet(ns + "_" + sk + "_BE",    g_be);
-      GlobalVariableSet(ns + "_" + sk + "_RISK",  (double)g_riskPts);
-      GlobalVariableSet(ns + "_" + sk + "_TIME",  (double)(long)TimeCurrent());
+      string base = ns + "_" + sk;
+      // Publish payload fields first; SEQ and CMD are the final commit markers.
+      GlobalVariableSet(base + "_DIR",   dir);
+      GlobalVariableSet(base + "_SCORE", (double)sc);
+      GlobalVariableSet(base + "_OP",    g_op);
+      GlobalVariableSet(base + "_SL",    g_sl);
+      GlobalVariableSet(base + "_TP1",   g_tp1);
+      GlobalVariableSet(base + "_TP2",   g_tp2);
+      GlobalVariableSet(base + "_TP3",   g_tp3);
+      GlobalVariableSet(base + "_BE",    g_be);
+      GlobalVariableSet(base + "_RISK",  (double)g_riskPts);
+      GlobalVariableSet(base + "_TIME",  (double)(long)g_eaSignalCreated);
+      GlobalVariableSet(base + "_EXP",   (double)(long)expiresAt);
+      GlobalVariableSet(base + "_STATE", 1); // PENDING
+      GlobalVariableSet(base + "_SEQ",   (double)g_eaSeq);
+      GlobalVariableSet(base + "_CMD",   cmd);
    }
 
    if(doFile)
@@ -1592,7 +1745,9 @@ void EA_PushSignal(const bool buy)
    if(doEvt)
       EventChartCustom(0, (ushort)InpEAEventID, (long)cmd, g_op, json);
 
-   PrintFormat("APEX+DTC EA-HOOK seq %I64d → %s", g_eaSeq, dirS);
+   PrintFormat("APEX+DTC EA-HOOK published | id=%s | seq=%I64d | %s | expires=%s",
+                g_eaSignalId, g_eaSeq, dirS,
+                TimeToString(expiresAt, TIME_DATE | TIME_SECONDS));
 }
 
 void EA_Heartbeat()
@@ -1601,6 +1756,406 @@ void EA_Heartbeat()
    GlobalVariableSet(InpEANamespace + "_" + SymKey(_Symbol) + "_HB",
                      (double)(long)TimeCurrent());
 }
+
+//==================================================================
+// INTEGRATED ALGO EXECUTION ENGINE
+//==================================================================
+int AlgoDateKey(datetime when)
+{
+   MqlDateTime dt;
+   TimeToStruct(when, dt);
+   return(dt.year * 10000 + dt.mon * 100 + dt.day);
+}
+void AlgoLoadDailyBaseline()
+{
+   int today = AlgoDateKey(TimeCurrent());
+   if(today == g_algoDayKeyNum && g_algoDayStartEquity > 0) return;
+   g_algoDayKeyNum = today;
+   g_algoDayKey = StringFormat("APEX5_%I64d_DAILY_%d", AccountInfoInteger(ACCOUNT_LOGIN), today);
+   if(GlobalVariableCheck(g_algoDayKey)) g_algoDayStartEquity = GlobalVariableGet(g_algoDayKey);
+   else
+   {
+      g_algoDayStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+      GlobalVariableSet(g_algoDayKey, g_algoDayStartEquity);
+   }
+}
+bool AlgoDailyLossLimitHit()
+{
+   AlgoLoadDailyBaseline();
+   if(g_algoDayStartEquity <= 0 || InpAlgoMaxDailyLossPercent <= 0) return(true);
+   double lossPct = (g_algoDayStartEquity - AccountInfoDouble(ACCOUNT_EQUITY)) / g_algoDayStartEquity * 100.0;
+   return(lossPct >= InpAlgoMaxDailyLossPercent);
+}
+bool AlgoIsHedgingAccount()
+{
+   return((ENUM_ACCOUNT_MARGIN_MODE)AccountInfoInteger(ACCOUNT_MARGIN_MODE) ==
+          ACCOUNT_MARGIN_MODE_RETAIL_HEDGING);
+}
+int AlgoCountSymbolPositions()
+{
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+         PositionGetInteger(POSITION_MAGIC) == InpAlgoMagicNumber)
+         count++;
+   }
+   return(count);
+}
+int AlgoCountTotalPositions()
+{
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) == InpAlgoMagicNumber)
+         count++;
+   }
+   return(count);
+}
+bool AlgoCalculateOpenRisk(double &riskMoney)
+{
+   riskMoney = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpAlgoMagicNumber) continue;
+      string symbol = PositionGetString(POSITION_SYMBOL);
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      if(sl <= 0.0)
+      {
+         PrintFormat("APEX ALGO: position %I64u has no stop loss; blocking new entries because open risk cannot be verified.", ticket);
+         return(false);
+      }
+      ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      ENUM_ORDER_TYPE orderType = (ptype == POSITION_TYPE_BUY ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
+      double result = 0.0;
+      if(!OrderCalcProfit(orderType, symbol, volume, entry, sl, result))
+      {
+         PrintFormat("APEX ALGO: cannot calculate open risk for position %I64u on %s (error %d).", ticket, symbol, GetLastError());
+         return(false);
+      }
+      if(result < 0.0) riskMoney += MathAbs(result);
+   }
+   return(true);
+}
+bool AlgoCanAcceptTrade(const double newTradeRisk)
+{
+   if(!AlgoIsHedgingAccount())
+   {
+      Print("APEX ALGO: multiple independent positions require an MT5 hedging account. New entry blocked.");
+      return(false);
+   }
+   int symbolPositions = AlgoCountSymbolPositions();
+   int totalPositions = AlgoCountTotalPositions();
+   if(symbolPositions >= InpAlgoMaxPositionsPerSymbol)
+   {
+      PrintFormat("APEX ALGO: symbol position limit reached (%d/%d).", symbolPositions, InpAlgoMaxPositionsPerSymbol);
+      return(false);
+   }
+   if(totalPositions >= InpAlgoMaxTotalPositions)
+   {
+      PrintFormat("APEX ALGO: total EA position limit reached (%d/%d).", totalPositions, InpAlgoMaxTotalPositions);
+      return(false);
+   }
+   double currentRisk = 0.0;
+   if(!AlgoCalculateOpenRisk(currentRisk)) return(false);
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double riskCap = equity * InpAlgoMaxAggregateRiskPercent / 100.0;
+   if(equity <= 0.0 || currentRisk + newTradeRisk > riskCap)
+   {
+      PrintFormat("APEX ALGO: entry blocked by aggregate open-risk cap. Current=%.2f New=%.2f Cap=%.2f account currency.",
+                  currentRisk, newTradeRisk, riskCap);
+      return(false);
+   }
+   return(true);
+}
+string AlgoPositionPlanKey(const long positionId)
+{
+   return(g_algoBase + "_P" + IntegerToString(positionId));
+}
+void AlgoStorePositionPlan(const long positionId, const double tp1,
+                           const double tp2, const double be)
+{
+   if(positionId <= 0) return;
+   string key = AlgoPositionPlanKey(positionId);
+   GlobalVariableSet(key + "_TP1", tp1);
+   GlobalVariableSet(key + "_TP2", tp2);
+   GlobalVariableSet(key + "_BE", be);
+   GlobalVariableSet(key + "_STAGE", 0.0);
+}
+double AlgoNormalizeVolume(double volume)
+{
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0 || vmin <= 0 || vmax <= 0) return(0.0);
+   volume = MathMin(volume, vmax);
+   volume = MathFloor(volume / step + 1e-9) * step;
+   int digits = 0;
+   double test = step;
+   while(digits < 8 && MathAbs(test - MathRound(test)) > 1e-8) { test *= 10.0; digits++; }
+   volume = NormalizeDouble(volume, digits);
+   if(volume < vmin) return(0.0);
+   return(volume);
+}
+double AlgoCalculateVolume(ENUM_ORDER_TYPE orderType, double entry, double sl)
+{
+   if(!InpAlgoUseRiskPercent) return(AlgoNormalizeVolume(InpAlgoFixedLot));
+   if(InpAlgoRiskPercent <= 0 || InpAlgoRiskPercent > 5.0) return(0.0);
+   double riskMoney = AccountInfoDouble(ACCOUNT_EQUITY) * InpAlgoRiskPercent / 100.0;
+   double oneLotResult = 0.0;
+   if(!OrderCalcProfit(orderType, _Symbol, 1.0, entry, sl, oneLotResult))
+   {
+      PrintFormat("APEX ALGO: OrderCalcProfit failed, error=%d", GetLastError());
+      return(0.0);
+   }
+   double oneLotLoss = MathAbs(oneLotResult);
+   if(oneLotLoss <= 0) return(0.0);
+   return(AlgoNormalizeVolume(riskMoney / oneLotLoss));
+}
+bool AlgoTradingPermission()
+{
+   return(InpAlgoTradingEnabled && TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) &&
+          MQLInfoInteger(MQL_TRADE_ALLOWED) && AccountInfoInteger(ACCOUNT_TRADE_ALLOWED));
+}
+void ProcessPendingAPEXTrade()
+{
+   if(!g_algoPending) return;
+   int maxAge = MathMax(10, InpAlgoMaxSignalAgeSec);
+   if(g_algoPendingCreated <= 0 || (TimeCurrent() - g_algoPendingCreated) > maxAge)
+   {
+      Print("APEX ALGO: pending signal expired without execution.");
+      g_algoPending = false;
+      return;
+   }
+   if(!InpAlgoTradingEnabled)
+   {
+      if(!g_algoPendingLogOnce)
+      {
+         Print("APEX ALGO: signal received; automatic execution is OFF. Enable InpAlgoTradingEnabled.");
+         g_algoPendingLogOnce = true;
+      }
+      return;
+   }
+   if(!AlgoTradingPermission()) return;
+
+   if(AlgoDailyLossLimitHit())
+   {
+      Print("APEX ALGO: trade blocked by daily equity-loss limit.");
+      g_algoPending = false;
+      return;
+   }
+   // Multiple independent positions are supported on hedging accounts only.
+   if(!AlgoIsHedgingAccount())
+   {
+      Print("APEX ALGO: this multi-position configuration requires an MT5 hedging account.");
+      g_algoPending = false;
+      return;
+   }
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return;
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   if(point <= 0) { g_algoPending = false; return; }
+   double spreadPts = (tick.ask - tick.bid) / point;
+   if(InpUseSpreadFilter && spreadPts > InpMaxSpreadPoints)
+   {
+      PrintFormat("APEX ALGO: trade blocked by spread filter (%.1f points).", spreadPts);
+      g_algoPending = false;
+      return;
+   }
+
+   bool buy = g_algoPendingBuy;
+   double entry = buy ? tick.ask : tick.bid;
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   double sl = NormalizeDouble(g_algoPendingSL, digits);
+   double tp1 = NormalizeDouble(g_algoPendingTP1, digits);
+   double tp2 = NormalizeDouble(g_algoPendingTP2, digits);
+   double tp3 = NormalizeDouble(g_algoPendingTP3, digits);
+   double be = NormalizeDouble(g_algoPendingBE, digits);
+   bool levelsOK = (g_algoPendingOP > 0 && sl > 0 && tp1 > 0 && tp2 > 0 && tp3 > 0 && be > 0);
+   if(buy) levelsOK = levelsOK && sl < entry && tp1 > entry && tp2 > tp1 && tp3 > tp2;
+   else    levelsOK = levelsOK && sl > entry && tp1 < entry && tp2 < tp1 && tp3 < tp2;
+
+   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   double minDistance = stopsLevel * point;
+   if(levelsOK)
+   {
+      if(buy) levelsOK = (entry - sl >= minDistance && tp3 - entry >= minDistance);
+      else    levelsOK = (sl - entry >= minDistance && entry - tp3 >= minDistance);
+   }
+   if(!levelsOK)
+   {
+      Print("APEX ALGO: trade blocked; signal levels are no longer valid at current market price.");
+      g_algoPending = false;
+      return;
+   }
+
+   string lastSignalKey = g_algoBase + "_LAST_SIGNAL";
+   double lastSignal = GlobalVariableCheck(lastSignalKey) ? GlobalVariableGet(lastSignalKey) : 0.0;
+   if((double)(long)g_algoPendingSignalTime <= lastSignal)
+   {
+      Print("APEX ALGO: duplicate signal ignored.");
+      g_algoPending = false;
+      return;
+   }
+   ENUM_ORDER_TYPE orderType = buy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   double lots = AlgoCalculateVolume(orderType, entry, sl);
+   if(lots <= 0)
+   {
+      Print("APEX ALGO: calculated volume is below broker minimum or risk inputs are invalid.");
+      g_algoPending = false;
+      return;
+   }
+   double proposedResult = 0.0;
+   if(!OrderCalcProfit(orderType, _Symbol, lots, entry, sl, proposedResult))
+   {
+      PrintFormat("APEX ALGO: cannot calculate proposed trade risk (error %d).", GetLastError());
+      g_algoPending = false;
+      return;
+   }
+   double newTradeRisk = MathMax(0.0, -proposedResult);
+   if(!AlgoCanAcceptTrade(newTradeRisk))
+   {
+      g_algoPending = false;
+      return;
+   }
+
+   g_algoTrade.SetExpertMagicNumber(InpAlgoMagicNumber);
+   g_algoTrade.SetDeviationInPoints(InpAlgoDeviationPoints);
+   g_algoTrade.SetTypeFillingBySymbol(_Symbol);
+   string comment = StringFormat("APEX5 %s %d", buy ? "BUY" : "SELL", g_algoPendingScore);
+   bool sent = buy ? g_algoTrade.Buy(lots, _Symbol, 0.0, sl, tp3, comment)
+                   : g_algoTrade.Sell(lots, _Symbol, 0.0, sl, tp3, comment);
+   uint retcode = g_algoTrade.ResultRetcode();
+   bool accepted = sent && (retcode == TRADE_RETCODE_DONE ||
+                            retcode == TRADE_RETCODE_PLACED ||
+                            retcode == TRADE_RETCODE_DONE_PARTIAL);
+   if(!accepted)
+   {
+      PrintFormat("APEX ALGO: order rejected. Retcode=%u, %s", retcode, g_algoTrade.ResultRetcodeDescription());
+      g_algoPending = false;
+      return;
+   }
+   // Persist TP1/TP2/BE against this exact position identifier.
+   ulong dealTicket = g_algoTrade.ResultDeal();
+   long positionId = 0;
+   if(dealTicket > 0 && HistoryDealSelect(dealTicket))
+      positionId = (long)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
+   if(positionId > 0)
+      AlgoStorePositionPlan(positionId, tp1, tp2, be);
+   else
+      PrintFormat("APEX ALGO WARNING: order %I64u opened, but position ID was not resolved; automatic TP1/TP2 management may not initialize.",
+                  g_algoTrade.ResultOrder());
+
+   GlobalVariableSet(lastSignalKey, (double)(long)g_algoPendingSignalTime);
+   PrintFormat("APEX ALGO: %s opened | lots=%.2f | entry=%.*f | SL=%.*f | TP3=%.*f | position=%I64d",
+               buy ? "BUY" : "SELL", lots, digits, entry, digits, sl, digits, tp3, positionId);
+   g_algoPending = false;
+}
+void ManageAPEXPositions()
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return;
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != InpAlgoMagicNumber) continue;
+
+      long positionId = (long)PositionGetInteger(POSITION_IDENTIFIER);
+      if(positionId <= 0) continue;
+      string key = AlgoPositionPlanKey(positionId);
+      if(!GlobalVariableCheck(key + "_TP1") ||
+         !GlobalVariableCheck(key + "_TP2") ||
+         !GlobalVariableCheck(key + "_BE") ||
+         !GlobalVariableCheck(key + "_STAGE")) continue;
+
+      double tp1 = GlobalVariableGet(key + "_TP1");
+      double tp2 = GlobalVariableGet(key + "_TP2");
+      double be = GlobalVariableGet(key + "_BE");
+      int stage = (int)GlobalVariableGet(key + "_STAGE");
+      if(tp1 <= 0.0 || tp2 <= 0.0 || be <= 0.0) continue;
+
+      ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      bool buy = (type == POSITION_TYPE_BUY);
+      double current = buy ? tick.bid : tick.ask;
+      double oldSL = PositionGetDouble(POSITION_SL);
+      double currentTP = PositionGetDouble(POSITION_TP);
+      double newSL = 0.0;
+      int nextStage = stage;
+      if(buy)
+      {
+         if(stage < 1 && current >= tp1 && InpAlgoMoveToBEAtTP1) { newSL = be; nextStage = 1; }
+         if(stage < 2 && current >= tp2 && InpAlgoMoveSLToTP1AtTP2) { newSL = tp1; nextStage = 2; }
+         if(newSL > 0.0 && (oldSL <= 0.0 || newSL > oldSL))
+         {
+            if(g_algoTrade.PositionModify(ticket, newSL, currentTP) &&
+               g_algoTrade.ResultRetcode() == TRADE_RETCODE_DONE)
+               GlobalVariableSet(key + "_STAGE", (double)nextStage);
+            else
+               PrintFormat("APEX ALGO: BUY position %I64u SL update failed. Retcode=%u, %s",
+                           ticket, g_algoTrade.ResultRetcode(), g_algoTrade.ResultRetcodeDescription());
+         }
+      }
+      else
+      {
+         if(stage < 1 && current <= tp1 && InpAlgoMoveToBEAtTP1) { newSL = be; nextStage = 1; }
+         if(stage < 2 && current <= tp2 && InpAlgoMoveSLToTP1AtTP2) { newSL = tp1; nextStage = 2; }
+         if(newSL > 0.0 && (oldSL <= 0.0 || newSL < oldSL))
+         {
+            if(g_algoTrade.PositionModify(ticket, newSL, currentTP) &&
+               g_algoTrade.ResultRetcode() == TRADE_RETCODE_DONE)
+               GlobalVariableSet(key + "_STAGE", (double)nextStage);
+            else
+               PrintFormat("APEX ALGO: SELL position %I64u SL update failed. Retcode=%u, %s",
+                           ticket, g_algoTrade.ResultRetcode(), g_algoTrade.ResultRetcodeDescription());
+         }
+      }
+   }
+}
+
+//==================================================================
+// EMA RIBBON DRAWING FOR EXPERT ADVISOR CHARTS
+//==================================================================
+void DrawEMAValues(const string id, const double &values[], const int count,
+                   const color lineColor, const int width)
+{
+   int n = MathMin(count, 80);
+   for(int i = 1; i < n; i++)
+   {
+      datetime tOld = iTime(_Symbol, PERIOD_CURRENT, i);
+      datetime tNew = iTime(_Symbol, PERIOD_CURRENT, i - 1);
+      if(tOld <= 0 || tNew <= 0) continue;
+      string name = PFX + "EMA_" + id + "_" + IntegerToString(i);
+      TrendSeg("EMA_" + id + "_" + IntegerToString(i), tOld, values[i], tNew, values[i - 1],
+               lineColor, STYLE_SOLID, width);
+      ObjectSetInteger(0, name, OBJPROP_BACK, false);
+      ObjectSetInteger(0, name, OBJPROP_ZORDER, 5);
+   }
+}
+void DrawEMARibbon(const int count, const color lineColor)
+{
+   DeleteByPrefix(PFX + "EMA_");
+   DrawEMAValues("30", EMA1Buffer, count, lineColor, 3);
+   DrawEMAValues("35", EMA2Buffer, count, lineColor, 2);
+   DrawEMAValues("40", EMA3Buffer, count, lineColor, 2);
+   DrawEMAValues("45", EMA4Buffer, count, lineColor, 1);
+   DrawEMAValues("50", EMA5Buffer, count, lineColor, 1);
+   DrawEMAValues("60", EMA6Buffer, count, lineColor, 1);
+}
+
+// Consumer acknowledgement contract:
+// Write <namespace>_<symbol>_ACK = the consumed SEQ only after validating
+// signal_id, expiry, and payload. The EA must persist its last processed SEQ
+// and ignore any SEQ it has already handled to prevent duplicate execution.
 
 //==================================================================
 // MULTI-SYMBOL SCANNER (Full Quality)
@@ -1656,6 +2211,12 @@ void ScannerInit()
 bool ScannerAnalyzeLite(const int idx)
 {
    string sym = g_scanSyms[idx];
+   double symPoint = SymbolInfoDouble(sym, SYMBOL_POINT);
+   if(symPoint <= 0)
+   {
+      g_scanState[idx] = "NO PRICE DATA";
+      return(false);
+   }
 
    MqlRates r[];
    ArraySetAsSeries(r, true);
@@ -1693,7 +2254,7 @@ bool ScannerAnalyzeLite(const int idx)
    g_scanTrend[idx] = trend;
 
    // BOS / MSS
-   double buf = InpBOSBufferPoints * _Point;
+   double buf = InpBOSBufferPoints * symPoint;
    double c1 = r[1].close;
    bool bullBreak = (nH > 0 && c1 > swH[0] + buf);
    bool bearBreak = (nL > 0 && c1 < swL[0] - buf);
@@ -1702,8 +2263,8 @@ bool ScannerAnalyzeLite(const int idx)
 
    // Nearest liquidity
    double atr = AvgRange(r, total, 14);
-   if(atr <= 0) atr = 100 * _Point;
-   double tol = InpEqualTolPoints * _Point;
+   if(atr <= 0) atr = 100 * symPoint;
+   double tol = InpEqualTolPoints * symPoint;
    if(atr > 0) tol = MathMax(tol, atr * 0.10);
 
    double nearA = 0, nearB = 0;
@@ -1719,8 +2280,8 @@ bool ScannerAnalyzeLite(const int idx)
 
    // Sweeps
    bool swLow = false, swHigh = false;
-   double sb = InpSweepBufPoints * _Point;
-   double rc = InpReclaimPoints * _Point;
+   double sb = InpSweepBufPoints * symPoint;
+   double rc = InpReclaimPoints * symPoint;
    int maxS = MathMin(InpSweepWindow, total - 2);
 
    if(nearB > 0)
@@ -1802,9 +2363,11 @@ bool ScannerAnalyzeLite(const int idx)
    string kzN;
    bool kz = Killzone(kzN);
 
-   // Score
+   // Directional sweep contribution: sell-side sweep favors BUY,
+   // buy-side sweep favors SELL. Do not reward both sides for one event.
    int scB = 0, scS = 0;
-   if(swLow || swHigh) { scB += 25; scS += 25; }
+   if(swLow)  scB += 25;
+   if(swHigh) scS += 25;
    if(bullBreak) scB += (bullMSS ? 18 : 14);
    if(bearBreak) scS += (bearMSS ? 18 : 14);
    if(bullDisp) scB += 10;
@@ -1859,12 +2422,17 @@ void ScannerAlerts()
 
       g_scanAlerted[i] = g_scanBar[i];
       bool buy = (g_scanDir[i] == 1);
-      string msg = StringFormat("APEX+DTC SCAN | %s | %s | SCORE %d %s | SPRD %.0f",
-         g_scanSyms[i], buy ? "BUY" : "SELL", top, QualityOf(top), g_scanSpread[i]);
+      string popup = StringFormat("APEX SCAN %s | %s | %d %s | Spread %.0f",
+         buy ? "BUY" : "SELL", g_scanSyms[i], top, QualityOf(top), g_scanSpread[i]);
+      string push = StringFormat("APEX SCAN %s %s | %d %s",
+         buy ? "BUY" : "SELL", g_scanSyms[i], top, QualityOf(top));
 
-      if(InpPopupAlert) Alert(msg);
+      if(InpPopupAlert) Alert(popup);
       if(InpSoundAlert) PlaySound(InpSoundFile);
-      if(InpPushAlert)  SendNotification(msg);
+      if(InpPushAlert)  SendNotification(push);
+      PrintFormat("APEX SCAN | %s | %s | SCORE %d %s | SPREAD %.0f | STATE %s",
+         g_scanSyms[i], buy ? "BUY" : "SELL", top, QualityOf(top),
+         g_scanSpread[i], g_scanState[i]);
    }
 }
 
@@ -1900,60 +2468,48 @@ void RunScanner()
 
 void DrawScannerPanel()
 {
-   int x = InpScanPanelX;
-   int y = InpScanPanelY;
-   int W = 335;
+   if(!InpShowPanel || !InpScannerOn || g_scanN <= 0) return;
+
+   // Scanner is now a compact section INSIDE the main APEX dashboard.
+   int x = InpPanelX + 8;
+   int y = InpPanelY + 620;
+   int W = InpPanelWidth - 16;
    int rows = g_scanN;
-   int H = 50 + rows * 18;
+   int H = 48 + rows * 16;
 
    UIRect("SC_bg",  x, y, W, H, clrPanelBG, clrBorder);
-   UIRect("SC_hdr", x, y, W, 24, clrHeaderBG, clrBorder);
-   UILabel("SC_ttl", x + 10, y + 5, "APEX SCANNER", clrAccent, 9);
-   UILabel("SC_clk", x + W - 95, y + 6, "click = switch", clrTextDim, 7);
+   UIRect("SC_hdr", x, y, W, 22, clrHeaderBG, clrBorder);
+   UILabel("SC_ttl", x + 8, y + 5, "ALPHENTRA SCANNER", clrAccent, 9);
+   UILabel("SC_clk", x + W - 75, y + 6, "click = switch", clrTextDim, 7);
 
-   int hy = y + 28;
-   UILabel("SC_h0", x + 8,   hy, "SYMBOL", clrTextDim, 8);
-   UILabel("SC_h1", x + 80,  hy, "TREND",  clrTextDim, 8);
-   UILabel("SC_h2", x + 135, hy, "BIAS",   clrTextDim, 8);
-   UILabel("SC_h3", x + 185, hy, "B/S",    clrTextDim, 8);
-   UILabel("SC_h4", x + 235, hy, "GR",     clrTextDim, 8);
-   UILabel("SC_h5", x + 265, hy, "STATE",  clrTextDim, 8);
+   int hy = y + 27;
+   UILabel("SC_h0", x + 6,   hy, "SYMBOL", clrTextDim, 7);
+   UILabel("SC_h1", x + 72,  hy, "BIAS",   clrTextDim, 7);
+   UILabel("SC_h2", x + 132, hy, "B/S",    clrTextDim, 7);
+   UILabel("SC_h3", x + W - 48, hy, "STATE", clrTextDim, 7);
 
    for(int rr = 0; rr < rows; rr++)
    {
-      int i  = g_scanOrder[rr];
-      int ry = y + 48 + rr * 18;
+      int i = g_scanOrder[rr];
+      int ry = y + 44 + rr * 16;
       bool sig = (g_scanState[i] == "SIGNAL");
+      string rowId = "SC_r" + IntegerToString(i);
       color rowbg = sig ? clrScanSignal : clrScanNormal;
 
-      UIRect("SC_r" + IntegerToString(i) + "_bg", x + 4, ry - 2, W - 8, 16, rowbg, rowbg);
-
-      UILabel("SC_r" + IntegerToString(i) + "_sym", x + 8, ry,
-              g_scanSyms[i], clrTextMain, 8, "Consolas");
-
-      color tc = clrTextDim;
-      if(StringFind(g_scanTrend[i], "BULL") >= 0) tc = clrBuy;
-      else if(StringFind(g_scanTrend[i], "BEAR") >= 0) tc = clrSell;
-      UILabel("SC_r" + IntegerToString(i) + "_tr", x + 80, ry, g_scanTrend[i], tc, 8);
+      UIRect(rowId + "_bg", x + 3, ry - 1, W - 6, 15, rowbg, rowbg);
+      UILabel(rowId + "_sym", x + 6, ry, g_scanSyms[i], clrTextMain, 7, "Consolas");
 
       color hc = clrTextDim;
       if(StringFind(g_scanHTF[i], "BULL") >= 0) hc = clrBuy;
       else if(StringFind(g_scanHTF[i], "BEAR") >= 0) hc = clrSell;
-      UILabel("SC_r" + IntegerToString(i) + "_ht", x + 135, ry, g_scanHTF[i], hc, 8);
+      UILabel(rowId + "_ht", x + 72, ry, g_scanHTF[i], hc, 7);
 
-      UILabel("SC_r" + IntegerToString(i) + "_bs", x + 185, ry,
+      UILabel(rowId + "_bs", x + 132, ry,
               StringFormat("%d/%d", (int)g_scanBuy[i], (int)g_scanSell[i]),
-              g_scanBuy[i] >= g_scanSell[i] ? clrBuy : clrSell, 8, "Consolas");
+              g_scanBuy[i] >= g_scanSell[i] ? clrBuy : clrSell, 7, "Consolas");
 
-      int tS = (int)MathMax(g_scanBuy[i], g_scanSell[i]);
-      color gc = clrTextDim;
-      if(tS >= InpAPlusScore)      gc = clrBuy;
-      else if(tS >= InpAScore)     gc = clrAccent;
-      else if(tS >= InpMinimumScore) gc = clrTextMain;
-      UILabel("SC_r" + IntegerToString(i) + "_gr", x + 235, ry, QualityOf(tS), gc, 8, "Consolas");
-
-      UILabel("SC_r" + IntegerToString(i) + "_st", x + 265, ry, g_scanState[i],
-              sig ? clrAccent : (g_scanState[i] == "WATCH" ? clrTextMain : clrTextDim), 8);
+      UILabel(rowId + "_st", x + W - 48, ry, g_scanState[i],
+              sig ? clrAccent : (g_scanState[i] == "WATCH" ? clrTextMain : clrTextDim), 7);
    }
 }
 
@@ -2138,8 +2694,8 @@ bool Analyze()
    else if(swHigh) g_sweepTxt = "HIGH ✓";
    else            g_sweepTxt = "—";
 
-   g_buyScore  = Score(true,  swLow || swHigh, bullDisp, kz);
-   g_sellScore = Score(false, swLow || swHigh, bearDisp, kz);
+   g_buyScore  = Score(true,  swLow,  bullDisp, kz);
+   g_sellScore = Score(false, swHigh, bearDisp, kz);
 
    bool dirBuy = (g_buyScore >= g_sellScore);
    int  top    = dirBuy ? g_buyScore : g_sellScore;
@@ -2242,6 +2798,134 @@ void ResetDailyCounter()
 }
 
 //==================================================================
+// SESSION COUNTER RESET
+//==================================================================
+int CurrentSessionKey()
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   double hourNow = dt.hour + dt.min / 60.0;
+
+   for(int i = 0; i < MAX_SES; i++)
+   {
+      if(!g_sesOn[i] || g_sesHours[i] <= 0) continue;
+
+      double start = g_sesStart[i];
+      double end   = start + g_sesHours[i];
+      bool active  = false;
+      int sessionDay = dt.day_of_year;
+
+      if(end <= 24.0)
+         active = (hourNow >= start && hourNow < end);
+      else
+      {
+         active = (hourNow >= start || hourNow < end - 24.0);
+         if(active && hourNow < start) sessionDay--;
+      }
+
+      if(active)
+         return(sessionDay * 10 + i);
+   }
+
+   // Signals outside configured sessions share a separate off-session bucket.
+   return(dt.day_of_year * 10 + 9);
+}
+
+void ResetSessionCounter()
+{
+   int key = CurrentSessionKey();
+   if(g_sessionKey < 0)
+   {
+      g_sessionKey = key;
+      return;
+   }
+   if(key != g_sessionKey)
+   {
+      g_sessionKey = key;
+      g_sess = 0;
+   }
+}
+
+//==================================================================
+// ALPHENTRA TELEGRAM CHANNEL BADGE
+//==================================================================
+void DrawTelegramBadge()
+{
+   string bg   = PFX + "TELEGRAM_BG";
+   string text = PFX + "TELEGRAM_TEXT";
+
+   // Dashboard-matching navy background panel behind the existing white text.
+   if(ObjectFind(0, bg) < 0)
+   {
+      ResetLastError();
+      if(!ObjectCreate(0, bg, OBJ_RECTANGLE_LABEL, 0, 0, 0))
+      {
+         PrintFormat("APEX: Telegram background creation failed. Error=%d", GetLastError());
+         return;
+      }
+   }
+   // Use absolute pixel coordinates from the chart's upper-left corner.
+   // This avoids the ambiguous fixed-object anchoring at CORNER_RIGHT_LOWER.
+   long chartWidth = 0, chartHeight = 0;
+   if(!ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0, chartWidth) ||
+      !ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0, chartHeight))
+   {
+      PrintFormat("APEX: Cannot position Telegram background. Chart size error=%d", GetLastError());
+      return;
+   }
+
+   const int badgeW = 140;
+   const int badgeH = 36;
+   const int rightMargin = 14;
+   const int bottomMargin = 20;
+   
+   // Calculate badge position first
+   int badgeX = (int)chartWidth - rightMargin - badgeW;
+   int badgeY = (int)chartHeight - bottomMargin - badgeH;
+   
+   // Configure background
+   ObjectSetInteger(0, bg, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, bg, OBJPROP_XSIZE, badgeW);
+   ObjectSetInteger(0, bg, OBJPROP_YSIZE, badgeH);
+   ObjectSetInteger(0, bg, OBJPROP_XDISTANCE, badgeX);
+   ObjectSetInteger(0, bg, OBJPROP_YDISTANCE, badgeY);
+   
+   ObjectSetInteger(0, bg, OBJPROP_BGCOLOR, clrWhite);
+   ObjectSetInteger(0, bg, OBJPROP_COLOR, clrBorder);
+   ObjectSetInteger(0, bg, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, bg, OBJPROP_BACK, false);
+   ObjectSetInteger(0, bg, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, bg, OBJPROP_HIDDEN, false);
+   ObjectSetInteger(0, bg, OBJPROP_ZORDER, 999);
+
+   if(ObjectFind(0, text) < 0)
+   {
+      ResetLastError();
+      if(!ObjectCreate(0, text, OBJ_LABEL, 0, 0, 0))
+      {
+         PrintFormat("APEX: Telegram text creation failed. Error=%d", GetLastError());
+         return;
+      }
+   }
+
+// Center Telegram text inside the background badge.
+   ObjectSetInteger(0, text, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, text, OBJPROP_ANCHOR, ANCHOR_CENTER);
+   ObjectSetInteger(0, text, OBJPROP_XDISTANCE, badgeX + badgeW / 2);
+   ObjectSetInteger(0, text, OBJPROP_YDISTANCE, badgeY + badgeH / 2);
+   ObjectSetString(0, text, OBJPROP_TEXT, "@AlphentraAI");
+   ObjectSetInteger(0, text, OBJPROP_COLOR, C'1,0,0');
+   ObjectSetInteger(0, text, OBJPROP_FONTSIZE, 10);
+   ObjectSetString(0, text, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, text, OBJPROP_BACK, false);
+   ObjectSetInteger(0, text, OBJPROP_SELECTABLE, true);
+   ObjectSetInteger(0, text, OBJPROP_HIDDEN, false);
+   ObjectSetInteger(0, text, OBJPROP_ZORDER, 1000);
+
+   ChartRedraw(0);
+}
+
+//==================================================================
 // OBJECT UTILITIES
 //==================================================================
 void DeleteByPrefix(const string pfx)
@@ -2265,7 +2949,7 @@ void HLineL(const string id, const double p, const color c,
       ObjectCreate(0, nm, OBJ_HLINE, 0, 0, p);
       ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, nm, OBJPROP_HIDDEN, true);
-      ObjectSetInteger(0, nm, OBJPROP_BACK, false);
+      ObjectSetInteger(0, nm, OBJPROP_BACK, true);
       ObjectSetInteger(0, nm, OBJPROP_ZORDER, 2);
    }
    ObjectSetDouble(0, nm, OBJPROP_PRICE, p);
@@ -2284,6 +2968,7 @@ void ChartText(const string id, const datetime t, const double p,
       ObjectCreate(0, nm, OBJ_TEXT, 0, t, p);
       ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, nm, OBJPROP_HIDDEN, true);
+      ObjectSetInteger(0, nm, OBJPROP_BACK, true);
       ObjectSetInteger(0, nm, OBJPROP_ANCHOR, ANCHOR_LEFT);
    }
    ObjectSetInteger(0, nm, OBJPROP_TIME, t);
@@ -2304,7 +2989,7 @@ void TrendSeg(const string id, const datetime t1, const double p1,
       ObjectCreate(0, nm, OBJ_TREND, 0, t1, p1, t2, p2);
       ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, nm, OBJPROP_HIDDEN, true);
-      ObjectSetInteger(0, nm, OBJPROP_BACK, false);
+      ObjectSetInteger(0, nm, OBJPROP_BACK, true);
       ObjectSetInteger(0, nm, OBJPROP_RAY_RIGHT, false);
    }
    ObjectSetInteger(0, nm, OBJPROP_TIME, 0, t1);
@@ -2465,6 +3150,7 @@ void DrawTradePlan(const bool buy, const MqlRates &r[])
          ObjectSetInteger(0, nm, OBJPROP_ARROWCODE, buy ? 233 : 234);
          ObjectSetInteger(0, nm, OBJPROP_COLOR, dir);
          ObjectSetInteger(0, nm, OBJPROP_WIDTH, 3);
+         ObjectSetInteger(0, nm, OBJPROP_BACK, true);
          ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
          ObjectSetInteger(0, nm, OBJPROP_HIDDEN, true);
       }
@@ -2541,11 +3227,14 @@ void UIDraw()
    int W  = InpPanelWidth;
 
    // Background
-   UIRect("bg",  x, y0, W, 740, clrPanelBG, clrBorder);
+   int panelHeight = 740;
+   if(InpScannerOn && g_scanN > 0)
+      panelHeight = MathMax(panelHeight, 620 + 48 + g_scanN * 16 + 10);
+   UIRect("bg",  x, y0, W, panelHeight, clrPanelBG, clrBorder);
    UIRect("hdr", x, y0, W, 32,  clrHeaderBG, clrBorder);
 
-   UILabel("ttl",  x + 12, y0 + 7, "APEX + DTC", clrTextMain, 12);
-   UILabel("ttl2", x + 118, y0 + 7, "ELITE v1.2", clrAccent, 11);
+   UILabel("ttl",  x + 12, y0 + 7, "ELITE APEX", clrTextMain, 12);
+   UILabel("ttl2", x + 118, y0 + 7, "ALGO v2.0", clrAccent, 11);
 
    // Quality chip
    int top = MathMax(g_buyScore, g_sellScore);
@@ -2653,8 +3342,9 @@ void UIDraw()
    // Footer
    double spr = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    UILabel("f1", x + 12, ry,
-           StringFormat("SPRD %.0f   DAY %d/%d   SES %d/%d",
-                        spr, g_daily, InpMaxSignalsDay, g_sess, InpMaxSignalsSession),
+           StringFormat("SPRD %.0f   DAY %d/%d   SES %d/%d   ALGO %s",
+                        spr, g_daily, InpMaxSignalsDay, g_sess, InpMaxSignalsSession,
+                        InpAlgoTradingEnabled ? "ON" : "OFF"),
            clrTextDim, 8, "Consolas");
    ry += 16;
 
@@ -2662,8 +3352,10 @@ void UIDraw()
    color  st2c = clrTextDim;
    if(g_confirmed)
    {
-      st2 = "STATUS: SIGNAL FIRED → EA HOOK";
-      st2c = clrAccent;
+      st2 = InpAlgoTradingEnabled
+            ? "STATUS: SIGNAL FIRED → AUTO EXECUTION"
+            : "STATUS: SIGNAL FIRED • ALGO OFF";
+      st2c = InpAlgoTradingEnabled ? clrBuy : clrAccent;
    }
    else if(g_block != "" && StringFind(g_signal, "BLOCKED") >= 0)
    {
